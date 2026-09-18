@@ -1,0 +1,137 @@
+// TraceMind — Prisma schema (Stage 2)
+//
+// Six models, matching the product's data graph:
+//   Person -> KnowledgeSource -> Decision -> Evidence -> TimelineEvent
+// with DecisionParticipant as the join table between Person and Decision.
+//
+// SQLite is used for easy local development (a single dev.db file, zero
+// setup). The schema intentionally avoids SQLite-only features (no native
+// enums — SQLite/Prisma doesn't support them, so status/type fields are
+// plain strings with values constrained in application code) so switching
+// `provider` to "postgresql" and `url` to a Postgres connection string is
+// the only change needed to move to Postgres later.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A person who participates in institutional decisions and/or contributes
+/// knowledge sources (meeting notes, documents).
+model Person {
+  id         String   @id @default(cuid())
+  name       String   @unique
+  role       String
+  department String
+  createdAt  DateTime @default(now())
+
+  participations   DecisionParticipant[]
+  knowledgeSources KnowledgeSource[]
+
+  @@map("people")
+}
+
+/// A document or meeting note ingested into TraceMind. Its raw/extracted
+/// text is what the AI extraction step (src/lib/gemini.ts) analyzes, and
+/// what Ask TraceMind later searches for institutional context.
+model KnowledgeSource {
+  id        String   @id @default(cuid())
+  title     String
+  /// "Document" | "Meeting"
+  type      String
+  /// Full extracted text (from a Meeting notes textarea, or extracted from
+  /// an uploaded PDF/TXT file).
+  content   String
+  /// Original uploaded file name, when this source came from a file.
+  fileName  String?
+  addedById String?
+  addedBy   Person?  @relation(fields: [addedById], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+
+  evidence       Evidence[]
+  timelineEvents TimelineEvent[]
+
+  @@map("knowledge_sources")
+}
+
+/// A decision made by the organization — the central entity in TraceMind's
+/// traceability story. Created either by hand (seed data) or by the AI
+/// knowledge-ingestion flow after a human reviews and approves the
+/// extraction (src/app/api/knowledge/save/route.ts).
+model Decision {
+  id           String   @id @default(cuid())
+  title        String
+  /// "Approved" | "Pending" | "Deferred" | "Rejected"
+  status       String
+  /// WHAT was decided.
+  summary      String
+  /// WHY it was decided.
+  reason       String
+  /// What happened after the decision was made, if known yet.
+  outcome      String?
+  decisionDate DateTime
+  createdAt    DateTime @default(now())
+
+  participants   DecisionParticipant[]
+  evidence       Evidence[]
+  timelineEvents TimelineEvent[]
+
+  @@map("decisions")
+}
+
+/// Join table connecting people to the decisions they took part in.
+/// `role` distinguishes the decision owner from other participants.
+model DecisionParticipant {
+  id         String @id @default(cuid())
+  decisionId String
+  personId   String
+  /// "Owner" | "Participant"
+  role       String
+
+  decision Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  person   Person   @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([decisionId, personId])
+  @@map("decision_participants")
+}
+
+/// Links a Decision to a KnowledgeSource that supports it, with the
+/// specific excerpt that justifies the link. This is the "evidence" a
+/// Decision Detail page shows, and what Ask TraceMind cites as a source.
+model Evidence {
+  id                String   @id @default(cuid())
+  decisionId        String
+  knowledgeSourceId String
+  excerpt           String
+  createdAt         DateTime @default(now())
+
+  decision        Decision        @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  knowledgeSource KnowledgeSource @relation(fields: [knowledgeSourceId], references: [id], onDelete: Cascade)
+
+  @@unique([decisionId, knowledgeSourceId])
+  @@map("evidence")
+}
+
+/// A single entry on the institutional timeline / a Decision Trail step.
+/// Optionally linked to the Decision and/or KnowledgeSource it concerns —
+/// a Decision's trail is simply its TimelineEvents in date order.
+model TimelineEvent {
+  id                String   @id @default(cuid())
+  title             String
+  /// "event" | "meeting" | "document" | "decision"
+  type              String
+  description       String
+  eventDate         DateTime
+  decisionId        String?
+  knowledgeSourceId String?
+  createdAt         DateTime @default(now())
+
+  decision        Decision?        @relation(fields: [decisionId], references: [id], onDelete: SetNull)
+  knowledgeSource KnowledgeSource? @relation(fields: [knowledgeSourceId], references: [id], onDelete: SetNull)
+
+  @@map("timeline_events")
+}
